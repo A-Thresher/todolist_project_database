@@ -6,3 +6,7 @@ gem "erubis"
 gem "pg"
 
 ruby "3.0.0"
+
+group :production do
+  gem "puma"
+end

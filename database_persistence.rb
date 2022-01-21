@@ -1,13 +1,6 @@
 require "pg"
 
 class DatabasePersistence
-  JOINED_TABLE_STATEMENT = <<~SQL
-    SELECT lists.id AS list_id, lists.name AS list_name,
-           todos.id AS todo_id, todos.name AS todo_name, completed
-      FROM lists LEFT OUTER JOIN todos
-        ON lists.id = todos.list_id
-  SQL
-
   def initialize(logger)
     @db = if Sinatra::Base.production?
       PG.connect(ENV['DATABASE_URL'])
@@ -22,15 +15,34 @@ class DatabasePersistence
   end
 
   def find_list(id)
-    sql = JOINED_TABLE_STATEMENT + " WHERE lists.id = $1"
+    sql = <<~SQL
+      SELECT lists.*,
+            count(todos.id) AS todos_count,
+            count(NULLIF(todos.completed, true)) AS todos_remaining_count
+        FROM lists LEFT OUTER JOIN todos ON lists.id = todos.list_id
+      WHERE lists.id = $1
+      GROUP BY lists.id
+      ORDER BY lists.name
+    SQL
     result = query(sql, id)
-    transform_sql_table(result).first
+    tuple_to_list_hash(result.first)
   end
 
   def all_lists
-    sql = JOINED_TABLE_STATEMENT + " ORDER BY lists.id"
+    sql = <<~SQL
+      SELECT lists.*,
+             count(todos.id) AS todos_count,
+             count(NULLIF(todos.completed, true)) AS todos_remaining_count
+        FROM lists LEFT OUTER JOIN todos ON lists.id = todos.list_id
+       GROUP BY lists.id
+       ORDER BY lists.name
+    SQL
+
     result = query(sql)
-    transform_sql_table(result)
+
+    result.map do |tuple|
+      tuple_to_list_hash(tuple)
+    end
   end
 
   def create_new_list(list_name)
@@ -68,6 +80,17 @@ class DatabasePersistence
     query(sql, list_id)
   end
 
+  def find_todos_for_list(list_id)
+    sql = "SELECT * FROM todos WHERE list_id = $1"
+    result = query(sql, list_id)
+
+    result.map do |tuple|
+      { id: tuple["id"].to_i,
+        name: tuple["name"],
+        completed: tuple["completed"] == "t" }
+    end
+  end
+
   private
 
   def query(statement, *params)
@@ -75,24 +98,10 @@ class DatabasePersistence
     @db.exec_params(statement, params)
   end
 
-  def transform_sql_table(table)
-    table.each_with_object([]) do |tuple, memo|
-      todo =     { id: tuple["todo_id"].to_i,
-                   name: tuple["todo_name"],
-                   completed: tuple["completed"] == "t" }
-      current_list = memo.find { |hash| hash[:id] == tuple["list_id"].to_i }
-
-      if current_list
-        current_list[:todos] << todo
-      elsif tuple["todo_id"]
-        memo << { id: tuple["list_id"].to_i,
-                  name: tuple["list_name"],
-                  todos: [todo] }
-      else
-        memo << { id: tuple["list_id"].to_i,
-                  name: tuple["list_name"],
-                  todos: [] }
-      end
-    end
+  def tuple_to_list_hash(tuple)
+    { id: tuple["id"].to_i,
+      name: tuple["name"],
+      todos_count: tuple["todos_count"].to_i,
+      todos_remaining_count: tuple["todos_remaining_count"].to_i }
   end
 end
